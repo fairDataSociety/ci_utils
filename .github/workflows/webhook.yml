@@ -1,0 +1,95 @@
+name: Send Webhook
+
+on:
+  workflow_run:
+    workflows:
+      - ./.github/workflows/test
+  workflow_call:
+    secrets:
+      token:
+        required: true
+      wh_secret:
+        required: true
+      wh_url_d:
+        required: true
+      wh_url_m:
+        required: true
+    inputs:
+      commit:
+        required: false
+        type: string
+      branch:
+        required: true
+        type: string
+
+jobs:
+  send-webhook:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: select secret
+        id: selector
+        env:
+          branch_id: "${{ inputs.branch }}"
+        run: |
+          if [ "${branch_id}" == "development" ] || [ "${branch_id}" == "staging" ]; then
+            echo "WEBHOOK_URL_BRANCH=wh_url_d" >> "$GITHUB_OUTPUT"
+          else
+            echo "WEBHOOK_URL_BRANCH=wh_url_m" >> "$GITHUB_OUTPUT"
+          fi
+          
+      - name: Create Python Script
+        run: |
+          cat > run.py << EOF
+          #!/usr/bin/env python
+
+          import hashlib
+          import hmac
+          import json
+          import os
+          import requests
+
+          payload = {
+            "ref": os.getenv("GITHUB_REF", ""),
+            "head_commit": {
+              "id": os.getenv("GITHUB_SHA", "")
+            },
+            "repository": {
+              "name": os.getenv("GITHUB_REPOSITORY", "")
+            },
+            "compare": "Compare N/A",
+            "release": {
+              "tag_name": os.getenv("GITHUB_EVENT_RELEASE_TAG_NAME", ""),
+              "prerelease": bool(os.getenv("GITHUB_EVENT_RELEASE_PRERELEASE", "false"))
+            }
+          }
+
+          # Ensure all keys have some value
+          for key in payload:
+              if not payload[key]:
+                  payload[key] = ""
+
+          payload_json = json.dumps(payload)
+          secret = os.getenv("WEBHOOK_SECRET")
+
+          signature_sha1 = "sha1=" + hmac.new(secret.encode(), payload_json.encode(), hashlib.sha1).hexdigest()
+          signature_sha256 = "sha256=" + hmac.new(secret.encode(), payload_json.encode(), hashlib.sha256).hexdigest()
+
+          headers = {
+            "X-Hub-Signature": signature_sha1,
+            "X-Hub-Signature-256": signature_sha256,
+            "Content-Type": "application/json"
+          }
+          print(f"payload: {payload_json}")
+          response = requests.post(os.getenv("WEBHOOK_URL"), data=payload_json, headers=headers)
+          print(f"Webhook request sent. Status code: {response.status_code}")
+          EOF
+      
+      - name: Make Python Script Executable
+        run: chmod +x run.py
+      
+      - name: Run Python Script
+        run: ./run.py
+        env:
+          WEBHOOK_SECRET: ${{ secrets.wh_secret }}
+          WEBHOOK_URL: ${{ secrets[steps.selector.outputs.WEBHOOK_URL_BRANCH] }}
